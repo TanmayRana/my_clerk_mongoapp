@@ -1,9 +1,9 @@
 import { Webhook } from "svix";
 import { headers } from "next/headers";
 import { WebhookEvent } from "@clerk/nextjs/server";
+import { createOrUpdateUser, deleteUser, UserProps } from "@/lib/actions/user";
 
-export async function POST(req: Request) {
-  // You can find this in the Clerk Dashboard -> Webhooks -> choose the endpoint
+export async function POST(req: Request): Promise<Response> {
   const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET;
 
   if (!WEBHOOK_SECRET) {
@@ -12,29 +12,28 @@ export async function POST(req: Request) {
     );
   }
 
-  // Get the headers
+  // Helper function for error responses
+  const errorResponse = (message: string, status: number = 400) =>
+    new Response(JSON.stringify({ error: message }), {
+      status,
+      headers: { "Content-Type": "application/json" },
+    });
+
   const headerPayload = await headers();
   const svix_id = headerPayload.get("svix-id");
   const svix_timestamp = headerPayload.get("svix-timestamp");
   const svix_signature = headerPayload.get("svix-signature");
 
-  // If there are no headers, error out
   if (!svix_id || !svix_timestamp || !svix_signature) {
-    return new Response("Error occured -- no svix headers", {
-      status: 400,
-    });
+    return errorResponse("Error occurred -- missing svix headers", 400);
   }
 
-  // Get the body
   const payload = await req.json();
   const body = JSON.stringify(payload);
 
-  // Create a new Svix instance with your secret.
   const wh = new Webhook(WEBHOOK_SECRET);
-
   let evt: WebhookEvent;
 
-  // Verify the payload with the headers
   try {
     evt = wh.verify(body, {
       "svix-id": svix_id,
@@ -43,21 +42,57 @@ export async function POST(req: Request) {
     }) as WebhookEvent;
   } catch (err) {
     console.error("Error verifying webhook:", err);
-    return new Response("Error occured", {
-      status: 400,
-    });
+    return errorResponse("Error verifying webhook", 400);
   }
 
-  // Do something with the payload
-  // For this guide, you simply log the payload to the console
-  const { id } = evt.data;
   const eventType = evt.type;
-  console.log(`Webhook with and ID of ${id} and type of ${eventType}`);
+  console.log(`Webhook with ID ${evt.data.id} and type ${eventType}`);
   console.log("Webhook body:", body);
 
-  if (eventType === "user.created") {
-    console.log("User created:", evt.data);
+  if (eventType === "user.created" || eventType === "user.updated") {
+    const { id, first_name, last_name, image_url, email_addresses, username } =
+      evt.data as UserProps;
+
+    try {
+      const newUser = await createOrUpdateUser({
+        id,
+        first_name,
+        last_name,
+        image_url,
+        email_addresses,
+        username,
+      });
+
+      return new Response(
+        JSON.stringify({
+          message: "User created or updated",
+          newUser,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    } catch (error) {
+      console.error("Error creating or updating user:", error);
+      return errorResponse("Error creating or updating user", 400);
+    }
   }
 
+  if (eventType === "user.deleted") {
+    const { id } = evt.data as { id: string };
+
+    try {
+      await deleteUser(id);
+      return new Response(
+        JSON.stringify({
+          message: "User deleted",
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    } catch (error) {
+      console.error("Error deleting user:", error);
+      return errorResponse("Error deleting user", 400);
+    }
+  }
+
+  // Return a generic 200 response for unhandled events
   return new Response("", { status: 200 });
 }
